@@ -5,6 +5,7 @@ from google.oauth2 import service_account
 from googleapiclient.http import MediaInMemoryUpload
 import time
 import re
+import json #
 
 # Interface do App
 st.set_page_config(page_title="Fábrica de Roteiros", layout="wide")
@@ -68,7 +69,7 @@ if st.button("🚀 Iniciar Produção"):
         st.error("Preencha a chave e os títulos.")
     else:
         try:
-            drive_creds = st.secrets["gcp_service_account"]
+            drive_creds = json.loads(st.secrets["gcp_json"])
             drive_service = autenticar_drive(drive_creds)
             pasta_idioma_id = obter_ou_criar_pasta(idioma_alvo, pasta_principal_id, drive_service)
             
