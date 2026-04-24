@@ -97,7 +97,8 @@ def gerar_roteiro(titulo, prompt_base, idioma, pais, min_c, target_c, modelo_esc
                 instrucoes += f"\n\nERRO: O texto anterior ficou com {len(texto)} caracteres (mínimo é {min_c}) ou usou formatação proibida. REESCREVA APENAS TEXTO CORRIDO."
                 time.sleep(2)
         except Exception as e:
-            return f"Erro na IA: {e}", "FALHA"
+            # Se a chave da API for recusada, ele aborta na hora e devolve o erro real
+            return f"ERRO DA API: {str(e)}", "FALHA"
             
     return texto, "QUALIDADE BAIXA (Passou com ressalvas após 3 tentativas)"
 
@@ -123,19 +124,23 @@ if st.button("🚀 Iniciar Produção em Lote"):
                     st.write(f"Usando modelo: `{modelo_id}`")
                     
                     roteiro, qa = gerar_roteiro(t, prompt_base, idioma_alvo, pais_alvo, min_chars, target_chars, modelo_id)
-                    st.write(f"Status QA: {qa} | Tamanho final: {len(roteiro)} caracteres.")
                     
-                    if qa != "FALHA":
+                    # SE A API RECUSAR A CHAVE, MOSTRA O ERRO GIGANTE EM VERMELHO
+                    if qa == "FALHA":
+                        st.error(f"🚨 A Geração Falhou!\n\nDetalhes do Erro:\n{roteiro}")
+                        status.update(label=f"Falha: {t}", state="error")
+                    else:
+                        st.write(f"Status QA: {qa} | Tamanho final: {len(roteiro)} caracteres.")
                         nome_arquivo = f"{t.replace('/', '-')}.txt"
                         upload_to_drive(nome_arquivo, roteiro, pasta_idioma_id, drive_service)
                         st.write(f"✅ Arquivo salvo no Drive.")
-                    
-                    status.update(label=f"Concluído: {t}", state="complete")
+                        status.update(label=f"Concluído: {t}", state="complete")
                 
                 progresso.progress((i + 1) / len(titulos))
                 time.sleep(2) # Pausa para evitar rate limit da API
                 
-            st.success("Toda a fila de produção foi finalizada e enviada para o Drive!")
+            if qa != "FALHA":
+                st.success("Toda a fila de produção foi finalizada e enviada para o Drive!")
             
         except Exception as e:
-            st.error(f"Erro no processo de salvamento: {e}")
+            st.error(f"Erro no processo de salvamento do Google Drive: {e}")
