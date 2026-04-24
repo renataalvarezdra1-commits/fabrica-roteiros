@@ -31,7 +31,7 @@ def upload_to_drive(nome_arquivo, conteudo, folder_id, drive_service):
     media = MediaInMemoryUpload(conteudo.encode('utf-8'), mimetype='text/plain')
     drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-# --- BARRA LATERAL (CONFIGURAÇÕES) ---
+# --- BARRA LATERAL (CONFIGURAÇÕES & CUSTO) ---
 with st.sidebar:
     st.header("🔑 Configurações")
     gemini_key = st.text_input("Gemini API Key", type="password")
@@ -39,25 +39,26 @@ with st.sidebar:
     
     st.header("🧠 Motor da IA")
     opcao_modelo = st.selectbox(
-        "Selecione a Versão do Gemini:", 
-        [
-            "Gemini 3.1 Pro (Preview)", 
-            "Gemini 3 Flash",
-            "Gemini 1.5 Pro (Estável)"
-        ]
+        "Selecione a Versão:", 
+        ["Gemini 3.1 Pro (Preview)", "Gemini 3 Flash"]
     )
+    modelo_id = "models/gemini-3.1-pro-preview" if "3.1" in opcao_modelo else "models/gemini-3-flash"
     
-    # IDs atualizados conforme documentação de Abril/2026
-    mapa_modelos = {
-        "Gemini 3.1 Pro (Preview)": "models/gemini-3.1-pro-preview",
-        "Gemini 3 Flash": "models/gemini-3-flash",
-        "Gemini 1.5 Pro (Estável)": "models/gemini-1.5-pro-latest"
-    }
-    modelo_id = mapa_modelos[opcao_modelo]
+    st.header("📏 Parâmetros")
+    min_chars = st.number_input("Mínimo caracteres", value=2000)
+    target_chars = st.number_input("Alvo caracteres", value=3500)
+
+    # --- CÁLCULO DE CUSTO ESTIMADO ---
+    st.header("💰 Estimativa de Custo")
+    num_roteiros = st.empty() # Reservado para contagem
     
-    st.header("📏 Parâmetros de Texto")
-    min_chars = st.number_input("Mínimo de caracteres", value=2000)
-    target_chars = st.number_input("Alvo de caracteres", value=3500)
+    # Preços Gemini 3.1 Pro (Ref: Abril 2026)
+    price_in = 2.00 / 1_000_000
+    price_out = 12.00 / 1_000_000
+    
+    # Estimativa por roteiro (aprox 1200 tokens)
+    custo_unitario = (300 * price_in) + ((target_chars/4) * price_out)
+    st.info(f"Custo aprox. por roteiro: **US$ {custo_unitario:.4f}**")
 
 # --- CORPO DO APP ---
 col1, col2 = st.columns(2)
@@ -65,86 +66,75 @@ with col1:
     idioma_alvo = st.selectbox("Idioma", ["Francês", "Português", "Croata", "Inglês", "Sérvio", "Espanhol"])
     pais_alvo = st.text_input("País de referência", "França")
 with col2:
-    prompt_base = st.text_area("Instruções de Estilo", "Texto dinâmico, envolvente, focado em alta retenção.")
+    prompt_base = st.text_area("Instruções de Estilo", "Texto dinâmico, sem tópicos, foco em retenção.")
 
 titulos_raw = st.text_area("Títulos dos Vídeos (um por linha)", height=150)
+titulos = [t.strip() for t in titulos_raw.split('\n') if t.strip()]
+num_roteiros.write(f"Fila atual: **{len(titulos)} roteiros**")
+st.sidebar.write(f"Custo total da fila: **US$ {custo_unitario * len(titulos):.3f}**")
 
-# --- EXECUÇÃO COM STREAMING ---
+# --- LÓGICA DE PRODUÇÃO ---
 if st.button("🚀 Iniciar Produção em Lote"):
-    if not gemini_key or not titulos_raw:
-        st.error("Preencha a chave do Gemini e a lista de títulos.")
+    if not gemini_key or not titulos:
+        st.error("Preencha os dados necessários.")
     else:
         genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel(modelo_id)
         
-        # Tenta inicializar o modelo selecionado
-        try:
-            model = genai.GenerativeModel(modelo_id)
-        except:
-            st.warning(f"Modelo {modelo_id} não respondeu. Tentando fallback para 1.5-pro...")
-            model = genai.GenerativeModel("models/gemini-1.5-pro-latest")
-        
+        # Drive Setup
         drive_service = None
         pasta_idioma_id = None
         try:
             drive_creds = json.loads(st.secrets["gcp_json"])
             drive_service = autenticar_drive(drive_creds)
-            with st.spinner("Acessando Google Drive..."):
-                pasta_idioma_id = obter_ou_criar_pasta(idioma_alvo, pasta_principal_id, drive_service)
+            pasta_idioma_id = obter_ou_criar_pasta(idioma_alvo, pasta_principal_id, drive_service)
         except:
-            st.warning("⚠️ Drive inacessível. Use os botões de download.")
+            st.warning("⚠️ Drive em modo manual.")
 
-        titulos = [t.strip() for t in titulos_raw.split('\n') if t.strip()]
-        
-        for i, t in enumerate(titulos):
-            st.markdown(f"### 📝 Roteiro: {t}")
+        for t in titulos:
+            st.subheader(f"📝 Processando: {t}")
             
-            instrucoes = f"""
-            Escreva um roteiro corrido em {idioma_alvo} para o público da {pais_alvo}. 
-            REGRAS: 1. Apenas texto corrido. 2. Sem Markdown (#, *, tópicos). 
-            3. Alvo: {target_chars} caracteres. 4. Estilo: {prompt_base}.
-            Título: {t}. Comece direto no texto.
-            """
+            instrucoes = f"Escreva um roteiro corrido (sem # ou *) em {idioma_alvo} ({pais_alvo}). Título: {t}. Estilo: {prompt_base}. Alvo: {target_chars} caracteres."
             
             texto_final = ""
-            status_qa = "FALHA"
+            # Slot de texto para streaming
+            caixa_streaming = st.empty()
             
-            for tentativa in range(3):
-                st.caption(f"Tentativa {tentativa+1}/3...")
-                caixa_texto = st.empty()
-                texto_parcial = ""
+            try:
+                # GERAÇÃO EM TEMPO REAL
+                res = model.generate_content(instrucoes, stream=True)
+                for chunk in res:
+                    texto_final += chunk.text
+                    caixa_streaming.write(texto_final + " ✍️")
                 
-                try:
-                    res = model.generate_content(instrucoes, stream=True)
-                    for chunk in res:
-                        texto_parcial += chunk.text
-                        caixa_texto.info(texto_parcial + " ✍️")
-                    
-                    caixa_texto.success(texto_parcial)
-                    
-                    # Verificação de QA (Markdown e Tamanho)
-                    tem_markdown = bool(re.search(r'#|\*|- |[0-9]\.', texto_parcial))
-                    if len(texto_parcial) >= min_chars and not tem_markdown:
-                        texto_final = texto_parcial
-                        status_qa = "OK"
-                        break
-                    else:
-                        instrucoes += "\n\nAVISO: O texto anterior falhou no tamanho ou formato. Refaça apenas texto corrido e longo."
-                        time.sleep(2)
-                except Exception as e:
-                    st.error(f"Erro na API: {e}")
-                    break
-            
-            if status_qa == "OK":
+                caixa_streaming.markdown(texto_final) # Texto limpo ao final
+                
+                # QA Simples
+                tem_markdown = "#" in texto_final or "*" in texto_final
+                if len(texto_final) < min_chars or tem_markdown:
+                    st.error("⚠️ Falha no critério de qualidade (Curto ou com Markdown).")
+                
+                # AÇÕES DE SALVAMENTO
                 nome_arq = f"{t.replace('/', '-')}.txt"
-                salvo = False
-                if drive_service and pasta_idioma_id:
-                    try:
-                        upload_to_drive(nome_arq, texto_final, pasta_idioma_id, drive_service)
-                        st.write("✅ Salvo no Drive.")
-                        salvo = True
-                    except: pass
                 
-                if not salvo:
-                    st.download_button(label=f"⬇️ Baixar {nome_arq}", data=texto_final, file_name=nome_arq)
+                c_download, c_drive = st.columns(2)
+                with c_download:
+                    st.download_button("⬇️ Baixar TXT", data=texto_final, file_name=nome_arq)
+                
+                with c_drive:
+                    # Tenta automático primeiro
+                    try:
+                        if drive_service and pasta_idioma_id:
+                            upload_to_drive(nome_arq, texto_final, pasta_idioma_id, drive_service)
+                            st.success("✅ Salvo no Drive!")
+                        else:
+                            if st.button(f"📤 Reenviar: {t}"):
+                                upload_to_drive(nome_arq, texto_final, pasta_idioma_id, drive_service)
+                                st.success("Enviado!")
+                    except Exception as e:
+                        st.error("Erro no Drive (Cota). Use o download.")
+            
+            except Exception as e:
+                st.error(f"Erro na geração: {e}")
             
             st.divider()
