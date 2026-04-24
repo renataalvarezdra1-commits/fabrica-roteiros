@@ -17,17 +17,12 @@ def autenticar_drive(credentials_info):
     return build('drive', 'v3', credentials=creds)
 
 def obter_ou_criar_pasta(nome_pasta, parent_id, drive_service):
-    """Verifica se a subpasta do idioma existe; se não, cria."""
     query = f"mimeType='application/vnd.google-apps.folder' and name='{nome_pasta}' and '{parent_id}' in parents and trashed=false"
     results = drive_service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     items = results.get('files', [])
     
     if not items:
-        file_metadata = {
-            'name': nome_pasta,
-            'mimeType': 'application/vnd.google-apps.folder',
-            'parents': [parent_id]
-        }
+        file_metadata = {'name': nome_pasta, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_id]}
         folder = drive_service.files().create(body=file_metadata, fields='id').execute()
         return folder.get('id')
     return items[0].get('id')
@@ -46,11 +41,21 @@ with st.sidebar:
     st.header("🧠 Motor da IA")
     opcao_modelo = st.radio(
         "Selecione a Qualidade:", 
-        ["Modo Premium (Gemini 2.5 Pro)", "Modo Econômico (Gemini 3 Flash)"],
-        help="O Modo Premium tem vocabulário mais rico e segue regras estritas. O Flash é ultrarrápido e barato."
+        [
+            "Premium Max (Gemini 3.1 Pro)", 
+            "Premium (Gemini 2.5 Pro)", 
+            "Econômico (Gemini 3 Flash)"
+        ],
+        help="O 3.1 Pro é o mais avançado. O Flash é o mais rápido."
     )
+    
     # Define o ID do modelo com base na escolha
-    modelo_id = 'gemini-2.5-pro' if "Premium" in opcao_modelo else 'gemini-3-flash'
+    if "3.1" in opcao_modelo:
+        modelo_id = 'gemini-3.1-pro'
+    elif "2.5" in opcao_modelo:
+        modelo_id = 'gemini-2.5-pro'
+    else:
+        modelo_id = 'gemini-3-flash'
     
     st.header("📏 Parâmetros de Texto")
     min_chars = st.number_input("Mínimo de caracteres", value=2000)
@@ -66,81 +71,101 @@ with col2:
 
 titulos_raw = st.text_area("Títulos dos Vídeos (um por linha)", height=150)
 
-# --- MOTOR DE GERAÇÃO COM SISTEMA DE QUALIDADE (QA) ---
-def gerar_roteiro(titulo, prompt_base, idioma, pais, min_c, target_c, modelo_escolhido):
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel(modelo_escolhido)
-    
-    instrucoes = f"""
-    Crie um roteiro para narração de IA. 
-    REGRAS CRÍTICAS:
-    1. APENAS TEXTO CORRIDO. É terminantemente proibido usar formatação markdown (sem #, sem **, sem tópicos enumerados).
-    2. IDIOMA: {idioma}. CONTEXTO CULTURAL: {pais}.
-    3. TAMANHO ALVO: aproximadamente {target_c} caracteres.
-    4. ESTILO: {prompt_base}.
-    
-    Título do Vídeo: {titulo}
-    Comece o texto diretamente pela narração.
-    """
-    
-    for tentativa in range(3):
-        try:
-            res = model.generate_content(instrucoes)
-            texto = res.text.strip()
-            
-            # Verificação de Qualidade (QA)
-            tem_markdown = bool(re.search(r'#|\*|- |[0-9]\.', texto))
-            
-            if len(texto) >= min_c and not tem_markdown:
-                return texto, "QUALIDADE OK"
-            else:
-                instrucoes += f"\n\nERRO: O texto anterior ficou com {len(texto)} caracteres (mínimo é {min_c}) ou usou formatação proibida. REESCREVA APENAS TEXTO CORRIDO."
-                time.sleep(2)
-        except Exception as e:
-            # Se a chave da API for recusada, ele aborta na hora e devolve o erro real
-            return f"ERRO DA API: {str(e)}", "FALHA"
-            
-    return texto, "QUALIDADE BAIXA (Passou com ressalvas após 3 tentativas)"
-
-# --- EXECUÇÃO EM LOTE ---
+# --- EXECUÇÃO EM LOTE COM STREAMING ---
 if st.button("🚀 Iniciar Produção em Lote"):
     if not gemini_key or not titulos_raw:
         st.error("Preencha a chave do Gemini e a lista de títulos antes de começar.")
     else:
+        # Configura a IA
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel(modelo_id)
+        
+        # Tenta conectar no Drive (se falhar, não impede a geração do texto na tela)
+        drive_service = None
+        pasta_idioma_id = None
         try:
-            # 1. Autenticação e Preparação de Pastas
             drive_creds = json.loads(st.secrets["gcp_json"])
             drive_service = autenticar_drive(drive_creds)
-            
-            with st.spinner(f"Preparando pasta para '{idioma_alvo}' no Google Drive..."):
+            with st.spinner(f"Verificando pasta '{idioma_alvo}' no Drive..."):
                 pasta_idioma_id = obter_ou_criar_pasta(idioma_alvo, pasta_principal_id, drive_service)
-            
-            # 2. Início da Fila de Produção
-            titulos = [t.strip() for t in titulos_raw.split('\n') if t.strip()]
-            progresso = st.progress(0)
-            
-            for i, t in enumerate(titulos):
-                with st.status(f"Escrevendo roteiro: {t}...", expanded=True) as status:
-                    st.write(f"Usando modelo: `{modelo_id}`")
-                    
-                    roteiro, qa = gerar_roteiro(t, prompt_base, idioma_alvo, pais_alvo, min_chars, target_chars, modelo_id)
-                    
-                    # SE A API RECUSAR A CHAVE, MOSTRA O ERRO GIGANTE EM VERMELHO
-                    if qa == "FALHA":
-                        st.error(f"🚨 A Geração Falhou!\n\nDetalhes do Erro:\n{roteiro}")
-                        status.update(label=f"Falha: {t}", state="error")
-                    else:
-                        st.write(f"Status QA: {qa} | Tamanho final: {len(roteiro)} caracteres.")
-                        nome_arquivo = f"{t.replace('/', '-')}.txt"
-                        upload_to_drive(nome_arquivo, roteiro, pasta_idioma_id, drive_service)
-                        st.write(f"✅ Arquivo salvo no Drive.")
-                        status.update(label=f"Concluído: {t}", state="complete")
-                
-                progresso.progress((i + 1) / len(titulos))
-                time.sleep(2) # Pausa para evitar rate limit da API
-                
-            if qa != "FALHA":
-                st.success("Toda a fila de produção foi finalizada e enviada para o Drive!")
-            
         except Exception as e:
-            st.error(f"Erro no processo de salvamento do Google Drive: {e}")
+            st.warning("Aviso: Conexão com Google Drive falhou ou cota excedida. Os roteiros serão gerados apenas aqui na tela para você copiar/baixar.")
+
+        titulos = [t.strip() for t in titulos_raw.split('\n') if t.strip()]
+        
+        for i, t in enumerate(titulos):
+            st.markdown(f"### 📝 Escrevendo: {t}")
+            
+            instrucoes = f"""
+            Crie um roteiro para narração de IA. 
+            REGRAS CRÍTICAS:
+            1. APENAS TEXTO CORRIDO. É terminantemente proibido usar formatação markdown (sem #, sem **, sem tópicos enumerados).
+            2. IDIOMA: {idioma_alvo}. CONTEXTO CULTURAL: {pais_alvo}.
+            3. TAMANHO ALVO: aproximadamente {target_chars} caracteres.
+            4. ESTILO: {prompt_base}.
+            Título do Vídeo: {t}
+            Comece o texto diretamente pela narração.
+            """
+            
+            texto_final = ""
+            status_qa = "FALHA"
+            
+            # Loop de Tentativas (QA)
+            for tentativa in range(3):
+                st.caption(f"Tentativa {tentativa + 1}/3 - Analisando e gerando...")
+                caixa_texto = st.empty() # Cria um espaço vazio na tela para o texto ao vivo
+                texto_parcial = ""
+                
+                try:
+                    # Geração em Tempo Real (Streaming)
+                    res = model.generate_content(instrucoes, stream=True)
+                    for chunk in res:
+                        texto_parcial += chunk.text
+                        # Atualiza a tela ao vivo com um cursor simulado
+                        caixa_texto.info(texto_parcial + " ✍️")
+                    
+                    # Quando termina, remove o cursor
+                    caixa_texto.success(texto_parcial)
+                    
+                    # Validação de Qualidade
+                    tem_markdown = bool(re.search(r'#|\*|- |[0-9]\.', texto_parcial))
+                    
+                    if len(texto_parcial) >= min_chars and not tem_markdown:
+                        texto_final = texto_parcial
+                        status_qa = "OK"
+                        break # Se passou no teste, sai do loop
+                    else:
+                        instrucoes += f"\n\nERRO: O texto anterior ficou com {len(texto_parcial)} caracteres (mínimo é {min_chars}) ou usou formatação proibida. REESCREVA APENAS TEXTO CORRIDO."
+                        st.warning("⚠️ O texto não atingiu o padrão de qualidade (tamanho ou formatação). Refazendo...")
+                        time.sleep(2)
+                        
+                except Exception as e:
+                    st.error(f"Erro na API do Gemini: {e}")
+                    break
+            
+            # Pós-Processamento: Salvar no Drive ou Exibir Download
+            if status_qa == "OK":
+                nome_arquivo = f"{t.replace('/', '-')}.txt"
+                
+                # Tenta enviar pro Drive
+                salvo_no_drive = False
+                if drive_service and pasta_idioma_id:
+                    try:
+                        upload_to_drive(nome_arquivo, texto_final, pasta_idioma_id, drive_service)
+                        st.write("✅ **Salvo automaticamente no Google Drive!**")
+                        salvo_no_drive = True
+                    except Exception as e:
+                        pass # Silencia o erro do Drive porque vamos dar o botão de download
+                
+                # Se o Drive bloqueou (erro 403), cria um botão de Download direto no aplicativo
+                if not salvo_no_drive:
+                    st.download_button(
+                        label=f"⬇️ Baixar Roteiro: {nome_arquivo}",
+                        data=texto_final,
+                        file_name=nome_arquivo,
+                        mime="text/plain"
+                    )
+            else:
+                st.error("❌ Falha crítica: A IA não conseguiu gerar um roteiro dentro das regras após 3 tentativas.")
+                
+            st.divider() # Linha de separação entre os vídeos
