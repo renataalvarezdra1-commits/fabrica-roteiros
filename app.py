@@ -1,4 +1,5 @@
-    import streamlit as st
+        
+                import streamlit as st
 import google.generativeai as genai
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
@@ -273,4 +274,4 @@ if st.button("🚀 Iniciar Produção em Lote"):
 
         st.success(f"🏁 Lote concluído! {len(titulos)} roteiros processados.")
         st.rerun()
-        
+                
