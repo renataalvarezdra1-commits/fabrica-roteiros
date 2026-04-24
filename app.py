@@ -523,7 +523,7 @@ with tab_historico:
                 st.session_state.historico = []
                 st.rerun()
 
-        # Lista de roteiros
+# Lista de roteiros
         indices_apagar = []
         for i, r in enumerate(st.session_state.historico):
             drive_badge = (
@@ -542,4 +542,58 @@ with tab_historico:
                 <div class='roteiro-titulo'>{r['titulo']}</div>
                 <div class='roteiro-meta'>
                     {r['idioma']} · {r['chars']:,} chars · {r['ts']}
-                    &nbsp;{drive_badge} {q
+                    &nbsp;{drive_badge} {qa_badge}
+                </div>
+                <div class='roteiro-preview'>{preview}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            col_dl, col_re, col_del = st.columns([2, 2, 1])
+
+            with col_dl:
+                if r["texto"]:
+                    nome_arq = f"{r['titulo'][:60].replace('/', '-')}.txt"
+                    st.download_button(
+                        "⬇️ Baixar",
+                        data=r["texto"],
+                        file_name=nome_arq,
+                        key=f"hist_dl_{i}"
+                    )
+
+            with col_re:
+                if r["texto"] and not r["drive"] and st.session_state.drive_ok:
+                    if st.button("📤 Reenviar Drive", key=f"hist_re_{i}"):
+                        try:
+                            idioma_lbl = r["idioma"]
+                            idioma_nm  = IDIOMAS[idioma_lbl][0]
+                            if idioma_lbl not in st.session_state.pasta_cache:
+                                fid = obter_ou_criar_pasta(
+                                    idioma_nm, pasta_principal_id,
+                                    st.session_state.drive_service
+                                )
+                                st.session_state.pasta_cache[idioma_lbl] = fid
+                            nome_arq = f"{r['titulo'][:60].replace('/', '-')}.txt"
+                            upload_to_drive(
+                                nome_arq, r["texto"],
+                                st.session_state.pasta_cache[idioma_lbl],
+                                st.session_state.drive_service
+                            )
+                            st.session_state.historico[i]["drive"] = True
+                            st.success("✅ Enviado!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+            with col_del:
+                if st.button("🗑", key=f"hist_del_{i}", help="Apagar este roteiro"):
+                    indices_apagar.append(i)
+
+        if indices_apagar:
+            st.session_state.historico = [
+                r for j, r in enumerate(st.session_state.historico)
+                if j not in indices_apagar
+            ]
+            st.rerun()
+
+
+    
